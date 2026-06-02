@@ -77,12 +77,12 @@ class Agent:
         return action
 
 
-def main():
+def mc_rl():
+    """MC 강화학습"""
     env = GridWorld()
     agent = Agent()
     data = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
     gamma = 1.0
-    reward = -1
     alpha = 0.001
 
     # 에피소드를 5만번 반복하는데...
@@ -112,5 +112,38 @@ def main():
         print(row)
 
 
+def td_rl():
+    """TD 강화학습"""
+    env = GridWorld()
+    agent = Agent()
+    data = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
+    gamma = 1.0
+    # MC에 비해 학습 변동성이 작아 업데이트를 크게 할 수 있다?
+    alpha = 0.01
+
+    # 마찬가지로 5만 에피소드를 반복하고
+    for k in tqdm(range(50000)):
+        done = False
+        # 이것도 종료까지만 돌아가는데...원래 TD면 종료 또는 몇 번 이내...이래야 하는거 아닌가?
+        while not done:
+            # MC처럼 끝까지 갈 필요는 없지만, 직전 격자와 다음 격자를 비교해야 하니 현재 격자 위치 받고,
+            x, y = env.get_state()
+            # 다음 위치는 prime으로 받아서
+            action = agent.select_action()
+            (x_prime, y_prime), reward, done = env.step(action)
+            # 이건 위에서 이미 받아서 필요 없는거 같은데...
+            # x_prime, y_prime = env.get_state()
+            # 다음 격자의 r + γv와 전 격자의 v 차이의 α 비율만큼 업데이트
+            data[x][y] = data[x][y] + alpha * (
+                reward + gamma * data[x_prime][y_prime] - data[x][y]
+            )
+        env.reset()
+        # 격자별로 바로 업데이트하니까 역순으로 cum_reward를 전달하면서 상태 가치를 다시 구할 필요가 없다...
+
+    for row in data:
+        print(row)
+
+
 if __name__ == "__main__":
-    main()
+    # mc_rl()
+    td_rl()

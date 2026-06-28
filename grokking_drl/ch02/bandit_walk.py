@@ -25,6 +25,7 @@ print(P)
 import gymnasium as gym
 
 # 뜬금없이pip install git+https://github.com/mimoralea/gym-walk#egg=gym-walk 설치하고 import 해주고...
+# noinspection PyUnusedImports
 import gym_walk
 
 # 환경은 unwrapped로 풀어서 받아놓고

@@ -12,6 +12,8 @@ print(P)
 
 # gymnasium 환경을 쓰는 방법은 비슷하고 이름만 BanditSlipperyWalk
 import gymnasium as gym
+
+# noinspection PyUnusedImports
 import gym_walk
 
 env = gym.make("BanditSlipperyWalk-v0").unwrapped

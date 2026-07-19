@@ -119,6 +119,6 @@ while not done and step < 50:
 env.close()
 # 연속 그래프 모드 끄기...plt.show는 그 뒤에?
 plt.ioff()
-plt.show()
+# plt.show()
 
 print("시뮬레이션 종료")

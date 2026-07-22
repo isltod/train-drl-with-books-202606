@@ -1,6 +1,5 @@
 import gymnasium as gym
 import numpy as np
-import math
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -122,6 +121,7 @@ state_continuous, _ = env.reset()
 state = discretize(state_continuous, state_bounds, n_buckets)
 done = False
 
+# 이 코드로 그림이 된다...
 img = plt.imshow(env.render())
 plt.axis("off")
 # 연속 그래프 모드 켜기

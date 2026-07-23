@@ -16,8 +16,8 @@ print("Observation Space Low:", env.observation_space.low)
 upper_bounds = [2.4, 0.5, 0.418, 0.87]  # [m, m/s, rad, rad/s]
 lower_bounds = [-2.4, -0.5, -0.419, -0.87]
 # 이렇게...그래도 학습이 잘 되질 않는다..왜일까...
-upper_bounds = [4.8, 1.5, 0.418, 2.61]  # [m, m/s, rad, rad/s]
-lower_bounds = [-4.8, -1.5, -0.419, -2.61]
+upper_bounds = [4.8, 0.5, 0.418, 0.87]  # [m, m/s, rad, rad/s]
+lower_bounds = [-4.8, -0.5, -0.419, -0.87]
 
 cartpole_bounds = list(zip(lower_bounds, upper_bounds))
 print("설정된 경계값:", cartpole_bounds)

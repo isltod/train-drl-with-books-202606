@@ -9,6 +9,7 @@ from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
 from base64 import b64encode
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,27 +122,29 @@ class PytorchWrapper:
 
     def train_step(self):
         """
-        하나의 배치를 샘플링하여 학습을 수행한다.
+        하나의 배치(128개)를 샘플링하여 학습을 수행한다.
         """
         if len(self.buffer) < self.batch_size:
             return 0.0  # 데이터가 부족하면 학습하지 않음
 
         batch = self.buffer.sample(self.batch_size)
-        states, actions, rewards, dones, next_states = zip(*batch)
 
+        # 상태, 행동, 즉각보상, 종료여부, 다음상태 별로 받아 텐서로...
+        states, actions, rewards, dones, next_states = zip(*batch)
         states = torch.tensor(np.array(states), device=device)
+        # 상태 외에는 배치 차원 추가..
         actions = torch.tensor(actions, device=device).unsqueeze(1)
         rewards = torch.tensor(rewards, device=device).unsqueeze(1)
         dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
         next_states = torch.tensor(np.array(next_states), device=device)
 
-        # 현재 상태의 Q값 계산
+        # 현재 Q값 선택
         state_action_values = self.q_net(states).gather(1, actions)
 
         # 타겟 Q값 계산 (Target Network 사용)
         with torch.no_grad():
             next_action_values = self.target_q_net(next_states).max(1)[0].unsqueeze(1)
-            # 종료된 상태면 미래 보상은 0
+            # (1-done)으로 종료된 상태면 미래 보상은 0으로 마스킹
             expected_state_action_values = (
                 rewards + (1 - dones) * self.gamma * next_action_values
             )
@@ -161,7 +164,7 @@ class PytorchWrapper:
         """
         total_rewards = []
 
-        for episode in range(max_episodes):
+        for episode in tqdm(range(max_episodes)):
             state, _ = self.env.reset()
             episode_reward = 0
 
@@ -181,14 +184,15 @@ class PytorchWrapper:
                 state = next_state
                 episode_reward += reward
 
-                # 학습 수행
+                # 학습 수행 - 메서드 내에서 재생버퍼가 충분한지 확인...
                 self.train_step()
 
                 if done:
                     break
 
-            # 타겟 네트워크 동기화
+            # sync_rate 주기마다
             if episode % self.sync_rate == 0:
+                # load_state_dict로 타겟 네트워크 동기화
                 self.target_q_net.load_state_dict(self.q_net.state_dict())
 
             total_rewards.append(episode_reward)
@@ -200,13 +204,13 @@ class PytorchWrapper:
 
         return total_rewards
 
-    def save_video(self, filename="rl-video.mp4"):
+    def save_video(self, filename="go2_drl-01_dqn.mp4"):
         """
         학습된 모델로 비디오를 생성한다.
         """
         env = gym.make(self.env_name, render_mode="rgb_array")
         env = gym.wrappers.RecordVideo(
-            env, video_folder="videos", name_prefix="rl-video"
+            env, video_folder="videos", name_prefix="go2_drl"
         )
 
         state, _ = env.reset()
@@ -226,3 +230,29 @@ agent = PytorchWrapper("LunarLander-v3", hidden_size=128, lr=1e-3)
 print("학습을 시작한다...")
 history = agent.run_training(max_episodes=500)
 print("학습 완료.")
+
+# 결과 시각화
+# 학습 곡선 그리기
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+# 비디오 저장 및 재생 (가장 최근 저장된 비디오 파일명 확인 필요)
+# gymnasium의 RecordVideo는 videos 폴더에 파일을 생성한다.
+import glob
+import os
+
+# 테스트 플레이 및 비디오 저장
+agent.save_video()
+#
+# # 저장된 비디오 파일 찾기
+# video_files = glob.glob("videos/*.mp4")
+# if video_files:
+#     latest_video = max(video_files, key=os.path.getctime)
+#     display(display_video(latest_video))
+# else:
+#     print("비디오 파일을 찾을 수 없다.")

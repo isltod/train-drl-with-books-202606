@@ -3,12 +3,10 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
-from base64 import b64encode
 from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
@@ -231,8 +229,7 @@ print("학습을 시작한다...")
 history = agent.run_training(max_episodes=500)
 print("학습 완료.")
 
-# 결과 시각화
-# 학습 곡선 그리기
+# 결과 시각화 - 학습 곡선 그리기
 plt.figure(figsize=(10, 5))
 plt.plot(history)
 plt.title("Episode Rewards")
@@ -241,18 +238,5 @@ plt.ylabel("Reward")
 plt.grid(True)
 plt.show()
 
-# 비디오 저장 및 재생 (가장 최근 저장된 비디오 파일명 확인 필요)
-# gymnasium의 RecordVideo는 videos 폴더에 파일을 생성한다.
-import glob
-import os
-
 # 테스트 플레이 및 비디오 저장
 agent.save_video()
-#
-# # 저장된 비디오 파일 찾기
-# video_files = glob.glob("videos/*.mp4")
-# if video_files:
-#     latest_video = max(video_files, key=os.path.getctime)
-#     display(display_video(latest_video))
-# else:
-#     print("비디오 파일을 찾을 수 없다.")

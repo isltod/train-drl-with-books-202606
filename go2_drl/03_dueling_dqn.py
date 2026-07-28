@@ -14,26 +14,47 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"사용 장치: {device}")
 
 
-# DQN
-class DQN(nn.Module):
+# 여기만 Double DQN과 달라지는 부분이고...
+class DuelingDQN(nn.Module):
     def __init__(self, obs_size, hidden_size, n_actions):
         """
-        DQN 네트워크 초기화
+        Dueling DQN 네트워크 초기화
         :param obs_size: 입력 상태의 차원
         :param hidden_size: 은닉층 노드 수
         :param n_actions: 출력 행동의 수
         """
         super().__init__()
-        self.net = nn.Sequential(
+
+        # 공통 특징 추출층 (Feature Layer)
+        self.feature_layer = nn.Sequential(
             nn.Linear(obs_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, n_actions),
         )
 
+        # 이점(Advantage) 스트림: 각 행동의 상대적 중요도 학습
+        self.advantage_stream = nn.Linear(hidden_size, n_actions)
+
+        # 가치(Value) 스트림: 상태 자체의 절대적 가치 학습
+        self.value_stream = nn.Linear(hidden_size, 1)
+
     def forward(self, x):
-        return self.net(x.float())
+        # 먼저 공통구조 fc 2개를 relu로 통과시키고
+        features = self.feature_layer(x.float())
+
+        # advantage와 상태값으로 분기 - 활성화 없음
+        advantage = self.advantage_stream(features)
+        value = self.value_stream(features)
+
+        # Dueling Aggregation (결합)
+        # 그러니까 V와 (A - A')으로 나눠서 생각할 수 있는데, 뒤를 그냥 A로 두면
+        # A가 열라크고 V는 엄청 작을 수도 있고,
+        # 반대로 A가 음수로 엄청 작고 V는 엄청 클 수도 있는 문제가 unidentifiable 문제인데...
+        # 이렇게 만들면 A - A' 부분이 어느정도 작은 범위 안에 고정되서
+        # V를 적당한 범위 내에서 추정할 수 있게 되고, 따라서 A도 대충 맞출 수 있다는 얘기인 듯...
+        # Q(s,a) = V(s) + (A(s,a) - Mean(A(s,a)))
+        return value + advantage - advantage.mean(dim=1, keepdim=True)
 
 
 # 재생버퍼
@@ -51,7 +72,7 @@ class ReplayBuffer:
         return random.sample(self.buffer, batch_size)
 
 
-# 학습 메인 클래스
+# 학습 클래스
 class PytorchWrapper:
     def __init__(
         self,
@@ -73,8 +94,8 @@ class PytorchWrapper:
         obs_size = self.env.observation_space.shape[0]
         n_actions = self.env.action_space.n
 
-        # 네트워크 초기화
-        self.q_net = DQN(obs_size, hidden_size, n_actions).to(device)
+        # Dueling DQN을 Double DQN 구조로 만든다...이 두 기법을 자주 같이 쓴단다...
+        self.q_net = DuelingDQN(obs_size, hidden_size, n_actions).to(device)
         self.target_q_net = copy.deepcopy(self.q_net).to(device)
 
         # 최적화기 및 손실함수
@@ -85,21 +106,23 @@ class PytorchWrapper:
         self.buffer = ReplayBuffer(capacity)
 
     def get_action(self, state, epsilon):
+        # 늘 그렇듯 ε-greedy 정책...
         if random.random() < epsilon:
             return self.env.action_space.sample()
         else:
             state_t = torch.tensor(np.array([state]), device=device)
+            # 최대화 행동은 메인 네트워크에서 선택...
             q_values = self.q_net(state_t)
             return int(torch.argmax(q_values, dim=1).item())
 
-    # 하나의 배치(128개)를 샘플링해서 학습
     def train_step(self):
-        # 버퍼에 충분한 데이터 없으면 학습 안함
+        # 데이터 부족하면 학습 안하고 바로 나감
         if len(self.buffer) < self.batch_size:
             return 0.0
 
-        # 상태, 행동, 즉각보상, 종료여부, 다음상태 별로 받아 텐서로...
+        # 아니면 하나의 배치 경험들에 대해서 학습...
         batch = self.buffer.sample(self.batch_size)
+        # s, a, r, 종료여부 별로 gpu 텐서로 묶고
         states, actions, rewards, dones, next_states = zip(*batch)
         states = torch.tensor(np.array(states), device=device)
         actions = torch.tensor(actions, device=device).unsqueeze(1)
@@ -107,19 +130,13 @@ class PytorchWrapper:
         dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
         next_states = torch.tensor(np.array(next_states), device=device)
 
-        # 1. 현재 상태의 Q값 계산 (Main Net)
+        # 현재 상태의 Q값 계산은 메인 네트워크에서...
         state_action_values = self.q_net(states).gather(1, actions)
 
-        # 2. 타겟 Q값 계산 (Double DQN Logic)
+        # 타겟 Q값도 Double DQN 방식으로 계산
         with torch.no_grad():
-            # 여기가 기본 DQN과 달라지는 부분인데...행동은 메인 네트워크에서  고르고 가치는 타켓에서 계산한다는 점...
-            # (A) 행동 선택: Main Net을 사용하여 다음 상태에서 가장 좋은 행동을 고른다.
             next_actions = self.q_net(next_states).argmax(dim=1, keepdim=True)
-
-            # (B) 다음 상태에서 행동 가치 평가: Target Net을 사용하여 위에서 고른 행동의 가치를 계산한다.
             next_action_values = self.target_q_net(next_states).gather(1, next_actions)
-
-            # 종료된 상태는 (1-done) 마스킹으로 미래 보상이 0
             expected_state_action_values = (
                 rewards + (1 - dones) * self.gamma * next_action_values
             )
@@ -129,6 +146,7 @@ class PytorchWrapper:
 
         self.optimizer.zero_grad()
         loss.backward()
+        # 여기서는 학습만 하고 q_net/target_q_net 동기화는 run_training에서 진행...
         self.optimizer.step()
 
         return loss.item()
@@ -140,10 +158,9 @@ class PytorchWrapper:
             state, _ = self.env.reset()
             episode_reward = 0
 
-            # 입실론 감쇠
+            # ε 감쇄...
             epsilon = max(0.01, 1.0 - (episode / 200))
 
-            # n-step 학습
             for step in range(max_steps):
                 action = self.get_action(state, epsilon)
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
@@ -153,13 +170,13 @@ class PytorchWrapper:
                 state = next_state
                 episode_reward += reward
 
-                # 학습 수행 - 재생버퍼가 충분한지는 train_step에서 확인...
+                # 한 스텝마다 무조건 학습 보내고 버퍼 충분한지는 train_step에서 판단
                 self.train_step()
 
                 if done:
                     break
 
-            # sync_rate 주기로 타겟 네트워크 동기화
+            # Double DQN 방식으로 sync_rate 주기로 target_q_net 동기화
             if episode % self.sync_rate == 0:
                 self.target_q_net.load_state_dict(self.q_net.state_dict())
 
@@ -172,9 +189,9 @@ class PytorchWrapper:
 
         return total_rewards
 
-    def save_video(self, filename="go2_drl-02_double_dqn"):
+    def save_video(self, filename="go2_drl-03_dueling_dqn"):
+        # 비디오 촬영은 새 환경 만들어서...
         env = gym.make(self.env_name, render_mode="rgb_array")
-        # 이렇게 RecordVideo 래퍼 클래스로 감싸주면 알아서 동영상 생성...
         env = gym.wrappers.RecordVideo(env, video_folder="videos", name_prefix=filename)
 
         state, _ = env.reset()
@@ -186,21 +203,23 @@ class PytorchWrapper:
         env.close()
 
 
-# Double DQN 모델 생성
+# Dueling DQN 모델 생성
 agent = PytorchWrapper("LunarLander-v3", hidden_size=128, lr=1e-3)
 
 # 학습 시작
-print("Double DQN 학습을 시작한다...")
+print("Dueling DQN 학습을 시작한다...")
 history = agent.run_training(max_episodes=600)
 print("학습 완료.")
 
-# 결과 시각화 - 학습 곡선
+# 결과 시각화
+# 학습 곡선
 plt.figure(figsize=(10, 5))
 plt.plot(history)
-plt.title("Double DQN Episode Rewards")
+plt.title("Dueling DQN Episode Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Reward")
 plt.grid(True)
 plt.show()
 
-agent.save_video()
+# 비디오 저장 및 확인
+agent.save_video("dueling-dqn")

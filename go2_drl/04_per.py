@@ -8,6 +8,7 @@ import torch.optim as optim
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -101,4 +102,175 @@ class PrioritizedReplayBuffer:
         weights = (total_items * probs[indices]) ** (-beta)
         weights /= weights.max()  # 안정성을 위해 정규화
 
+        # 가중치는 당연한데, 앞과 다르게 샘플 인덱스도 반환...
         return indices, np.array(weights, dtype=np.float32), samples
+
+
+# 학습 클래스
+class PytorchWrapper:
+    def __init__(
+        self,
+        env_name,
+        hidden_size=128,
+        lr=1e-3,
+        capacity=100000,
+        gamma=0.99,
+        batch_size=256,
+        sync_rate=10,
+        alpha=0.6,
+        beta_start=0.4,
+    ):
+        self.env_name = env_name
+        self.gamma = gamma
+        self.batch_size = batch_size
+        self.sync_rate = sync_rate
+        self.beta = beta_start
+        self.beta_increment = (
+            1.0 - beta_start
+        ) / 100000  # Beta를 조금씩 1.0으로 증가시킴
+
+        # 환경 생성
+        self.env = gym.make(env_name, render_mode="rgb_array")
+        obs_size = self.env.observation_space.shape[0]
+        n_actions = self.env.action_space.n
+
+        # 네트워크 초기화 (Dueling DQN을 Double DQN 방식으로)
+        self.q_net = DuelingDQN(obs_size, hidden_size, n_actions).to(device)
+        self.target_q_net = copy.deepcopy(self.q_net).to(device)
+
+        self.optimizer = optim.AdamW(self.q_net.parameters(), lr=lr)
+
+        # PER 버퍼 생성
+        self.buffer = PrioritizedReplayBuffer(capacity, alpha=alpha)
+
+    def get_action(self, state, epsilon):
+        if random.random() < epsilon:
+            return self.env.action_space.sample()
+        else:
+            state_t = torch.tensor(np.array([state]), device=device)
+            q_values = self.q_net(state_t)
+            return int(torch.argmax(q_values, dim=1).item())
+
+    def train_step(self):
+        if len(self.buffer) < self.batch_size:
+            return 0.0
+
+        # 1. PER 버퍼에서 샘플링 (Beta 적용)
+        self.beta = min(1.0, self.beta + self.beta_increment)
+        indices, weights, batch = self.buffer.sample(self.batch_size, self.beta)
+        # s, a, r, done, s' 별로 텐서로 묶는 건 동일...
+        states, actions, rewards, dones, next_states = zip(*batch)
+        states = torch.tensor(np.array(states), device=device)
+        actions = torch.tensor(actions, device=device).unsqueeze(1)
+        rewards = torch.tensor(rewards, device=device).unsqueeze(1)
+        dones = torch.tensor(dones, dtype=torch.float32, device=device).unsqueeze(1)
+        next_states = torch.tensor(np.array(next_states), device=device)
+        weights = torch.tensor(weights, device=device).unsqueeze(1)  # 가중치 텐서
+
+        # 2. Q값 계산
+        state_action_values = self.q_net(states).gather(1, actions)
+
+        # 3. 타겟 Q값 계산 (Double DQN 방식)
+        with torch.no_grad():
+            next_actions = self.q_net(next_states).argmax(dim=1, keepdim=True)
+            next_action_values = self.target_q_net(next_states).gather(1, next_actions)
+            expected_state_action_values = (
+                rewards + (1 - dones) * self.gamma * next_action_values
+            )
+
+        # 4. TD Error 계산 (우선순위 업데이트용, 기울기 계산 X) - 이게 PER에서 다른 부분...
+        td_errors = (
+            (state_action_values - expected_state_action_values)
+            .abs()
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+        # 5. 버퍼 우선순위 업데이트
+        self.buffer.update(indices, td_errors.flatten())
+
+        # 6. 손실 계산 (Importance Sampling Weights 적용)
+        loss = (
+            weights
+            * F.smooth_l1_loss(
+                state_action_values, expected_state_action_values, reduction="none"
+            )
+        ).mean()
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        return loss.item()
+
+    def run_training(self, max_episodes=600, max_steps=400):
+        total_rewards = []
+
+        for episode in tqdm(range(max_episodes)):
+            state, _ = self.env.reset()
+            episode_reward = 0
+            # ε 감쇄...
+            epsilon = max(0.01, 1.0 - (episode / 200))
+
+            for step in range(max_steps):
+                action = self.get_action(state, epsilon)
+                next_state, reward, terminated, truncated, _ = self.env.step(action)
+                done = terminated or truncated
+
+                self.buffer.append((state, action, reward, done, next_state))
+                state = next_state
+                episode_reward += reward
+
+                self.train_step()
+
+                if done:
+                    break
+
+            if episode % self.sync_rate == 0:
+                self.target_q_net.load_state_dict(self.q_net.state_dict())
+
+            total_rewards.append(episode_reward)
+
+            if episode % 20 == 0:
+                print(
+                    f"Episode {episode}, Reward: {episode_reward:.2f}, Epsilon: {epsilon:.2f}, Beta: {self.beta:.2f}"
+                )
+
+        return total_rewards
+
+    def save_video(self, filename="go2_drl-04_per"):
+        env = gym.make(self.env_name, render_mode="rgb_array")
+        env = gym.wrappers.RecordVideo(env, video_folder="videos", name_prefix=filename)
+
+        state, _ = env.reset()
+        done = False
+        while not done:
+            action = self.get_action(state, epsilon=0.0)
+            state, _, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+        env.close()
+
+
+# PER + Dueling DQN 모델 생성
+agent = PytorchWrapper(
+    "LunarLander-v3", hidden_size=128, lr=1e-3, alpha=0.6, beta_start=0.4
+)
+
+# 학습 시작
+print("PER (Prioritized Experience Replay) 학습을 시작한다...")
+history = agent.run_training(max_episodes=600)
+print("학습 완료.")
+
+# 결과 시각화 - 학습 곡선
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("PER Dueling DQN Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+agent.save_video("per-dqn")
+
+# 책과 달리 나는 오히려 잘 수렴하며 학습한다...

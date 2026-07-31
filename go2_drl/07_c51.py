@@ -163,7 +163,7 @@ class PytorchWrapper:
             # next_probs[i, next_actions[i]] 반복을 효율적으로 수행
             next_dist = next_probs[range(batch_size), next_actions]  # (Batch, Atoms)
 
-            # 타겟 분포 투영 (Projection) - 가까운 support 들에 비율대로 나눠주기...
+            # 여기서부터 타겟 분포 투영 절차 - 가까운 support 들에 비율대로 나눠주기...
             # support 자체가 Q 값들...target = r + γQ'의 distributional 버전...
             # support는 계속 고정 상태고, 다음 Z' 계산 자체가 고정된 support에 γ를 곱하고 r을 더하고,
             # 그걸 다시 이 고정 support로 프로젝션 하는 방식으로 진행된다...
@@ -175,15 +175,16 @@ class PytorchWrapper:
 
             # 인덱스 계산 (bj = (현재 위치 - 최소 위치) / 한칸 크기)
             b = (t_z - self.v_min) / self.delta_z
-            # 그걸 왜 정수로 올림이나 내림을 하지?
+            # 4.3칸이라고 나오면 왼쪽이 4, 오른쪽이 5번 support (배치 64, atom 51)
             l = b.floor().long()
             u = b.ceil().long()
 
-            # 타겟 분포 초기화
+            # 이게 최종적으로 타겟 분포가 될 벡터인데...프로젝션 위해서 일단 0으로 초기화
             target_dist = torch.zeros_like(next_dist)
 
-            # 투영 수행 (Scatter add)
-            # l과 u 인덱스에 확률을 나눠서 할당 (Linear interpolation)
+            # 아래서 (배치, atom) 차원을 (배치 x atom)차원으로 펼쳐서 연산을 하려고 하니,
+            # 배치 0은 인덱스가 0부터 시작하면 되지만, 배치 1은 인덱스가 51부터 시작하는 등, 뒤로 가야 한다...
+            # 그래서 [0, 51, 102,...] 이런 모양의 텐서를 offset이란 이름으로 만들어둔다...
             offset = (
                 torch.linspace(0, (batch_size - 1) * self.n_atoms, batch_size)
                 .long()
@@ -191,7 +192,13 @@ class PytorchWrapper:
                 .to(device)
             )
 
-            # view(-1)로 펼쳐서 scatter_add 사용
+            # l과 u 인덱스에 확률을 나눠서 할당 (Linear interpolation)
+            aa = torch.tensor([[1, 2], [3, 4]])
+            bb = aa.view(-1)
+            # 1. view(-1) - 1차원 텐서로 펼치기,
+            # 2. (l + offset) - 배치 1 단계마다 51, 102,...를 더한 텐서 - (배치, atom)을 1차원으로 펼쳐서 계산하기 위한 인덱스...
+            # 3. (u.float() - b) - 오른쪽 거리 0.7
+            # 4. index_add_ - 0번 차원에, 2번 인덱스 위치에, 3번 값을 더한다...
             target_dist.view(-1).index_add_(
                 0, (l + offset).view(-1), (next_dist * (u.float() - b)).view(-1)
             )

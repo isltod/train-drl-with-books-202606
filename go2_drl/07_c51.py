@@ -8,6 +8,7 @@ import torch.optim as optim
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -213,6 +214,7 @@ class PytorchWrapper:
 
         # --- 3. 손실 함수 계산 (KL Divergence) ---
         # Cross Entropy: - sum(target * log(prediction))
+        # 역시나 여기서 로그 확률을 그대로 사용하려고 하는 모양인데...앞에서는 다시 exp도 사용하는데, 정말 이게 더 좋을까?
         loss = -(target_dist * current_log_dist).sum(dim=1).mean()
 
         self.optimizer.zero_grad()
@@ -224,13 +226,15 @@ class PytorchWrapper:
     def run_training(self, max_episodes=600, max_steps=400):
         total_rewards = []
 
-        for episode in range(max_episodes):
+        # 에피소드 수만큼 돌면서 경험 저장하고 학습하는데...여긴 간단하게 하네...
+        for episode in tqdm(range(max_episodes)):
             state, _ = self.env.reset()
             episode_reward = 0
 
             epsilon = max(0.01, 1.0 - (episode / 200))
 
             for step in range(max_steps):
+                # 어쨌거나 action은 기존과 마찬가지로 스칼라로 받으니까...
                 action = self.get_action(state, epsilon)
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
                 done = terminated or truncated
@@ -280,3 +284,16 @@ agent = PytorchWrapper(
 print("Distributional DQN (C51) 학습을 시작한다...")
 history = agent.run_training(max_episodes=600)
 print("학습 완료.")
+
+# 결과 시각화 - 학습 곡선
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("Distributional DQN Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+agent.save_video("go2_drl-07_c51")
+
+# 생각외로 이것도 잘 하는거 같다...

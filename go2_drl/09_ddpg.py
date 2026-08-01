@@ -8,6 +8,7 @@ import torch.optim as optim
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -120,7 +121,7 @@ class PytorchWrapper:
         """
         state_t = torch.tensor(np.array([state]), dtype=torch.float32, device=device)
 
-        # 평가모드는 왜 필요? self.training을 False로 하기 위해선가? 암튼 그래도 역전파를 막지는 않는다...
+        # self.actor의 순전파는 역전파되는 행동을 반환하고, 여기서는 역전파 없이 행동을 반환한다...
         self.actor.eval()
         with torch.no_grad():
             # 행동이 2차원 벡터로 값이 2개인데 그 중 앞에 값만 취해서 그게 행동이라고? 왜 이렇게 하지?
@@ -137,6 +138,7 @@ class PytorchWrapper:
     def soft_update(self, net, target_net):
         """Polyak Averaging: 타겟 네트워크를 천천히 업데이트"""
         for param, target_param in zip(net.parameters(), target_net.parameters()):
+            # τ 비율 만큼만 타겟 네트워크를 업데이트...
             target_param.data.copy_(
                 self.tau * param.data + (1 - self.tau) * target_param.data
             )
@@ -145,9 +147,9 @@ class PytorchWrapper:
         if len(self.buffer) < self.batch_size:
             return 0.0, 0.0
 
+        # 배치 샘플링하고 s, a, r, done, s' 별로 gpu 텐서로 묶고
         batch = self.buffer.sample(self.batch_size)
         states, actions, rewards, dones, next_states = zip(*batch)
-
         states = torch.tensor(np.array(states), dtype=torch.float32, device=device)
         actions = torch.tensor(np.array(actions), dtype=torch.float32, device=device)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
@@ -157,7 +159,7 @@ class PytorchWrapper:
         )
 
         # ----------------------------
-        # 1. Critic 업데이트
+        # 1. Critic 업데이트 - 타겟의 Q와 메인 네트워크의 Q 비교
         # ----------------------------
         with torch.no_grad():
             # 타겟 Actor로 다음 행동 예측
@@ -178,9 +180,9 @@ class PytorchWrapper:
         self.critic_optimizer.step()
 
         # ----------------------------
-        # 2. Actor 업데이트
+        # 2. Actor 업데이트 - 메인 네트워크 Q를 최대화하도록 메인네트워크 Q 이동...dQ*da
         # ----------------------------
-        # Actor가 예측한 행동에 대한 Q값을 최대화 (Gradient Ascent -> Minus Loss Descent)
+        # 메인 네트워크 Actor가 예측한 행동에 대한 Q값을 최대화 (경사하강법의 역...)
         predicted_actions = self.actor(states)
         actor_loss = -self.critic(states, predicted_actions).mean()
 
@@ -199,13 +201,15 @@ class PytorchWrapper:
     def run_training(self, max_episodes=600, max_steps=1000):
         total_rewards = []
 
-        for episode in range(max_episodes):
+        # 에피소드 수만큼 돌면서
+        for episode in tqdm(range(max_episodes)):
             state, _ = self.env.reset()
             episode_reward = 0
 
-            # 탐험 노이즈 감소 (선택 사항)
+            # 탐험 노이즈 감소 (0.1 -> 0.01)
             noise_scale = max(0.01, 0.1 - (episode / 500))
 
+            # 주어진 스텝 수 내에서 경험...
             for step in range(max_steps):
                 action = self.get_action(state, noise_scale)
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
@@ -215,6 +219,7 @@ class PytorchWrapper:
                 state = next_state
                 episode_reward += reward
 
+                # 경험치 충분하면 학습...
                 self.train_step()
 
                 if done:
@@ -256,3 +261,16 @@ agent = PytorchWrapper(
 print("DDPG 학습을 시작한다...")
 history = agent.run_training(max_episodes=500)
 print("학습 완료.")
+
+# 결과 시각화 - 학습 곡선
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("DDPG Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+agent.save_video("go2_drl-09_ddpg")
+
+# 이건 좀 확실히 안좋아보이는데...

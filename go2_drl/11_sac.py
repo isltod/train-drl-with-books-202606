@@ -9,6 +9,7 @@ from torch.distributions.normal import Normal
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -241,7 +242,7 @@ class PytorchWrapper:
     def run_training(self, max_episodes=600, max_steps=1000):
         total_rewards = []
 
-        for episode in range(max_episodes):
+        for episode in tqdm(range(max_episodes)):
             state, _ = self.env.reset()
             episode_reward = 0
 
@@ -292,3 +293,14 @@ agent = PytorchWrapper(
 print("SAC (Soft Actor-Critic) 학습을 시작한다...")
 history = agent.run_training(max_episodes=500)
 print("학습 완료.")
+
+# 결과 시각화 - 학습 곡선
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("SAC Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+agent.save_video("go2_drl-11_sac")

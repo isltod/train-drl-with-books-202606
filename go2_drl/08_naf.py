@@ -8,6 +8,7 @@ import torch.optim as optim
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -93,15 +94,19 @@ class NafDQN(nn.Module):
         L[:, tril_indices[0], tril_indices[1]] = matrix
 
         # 대각 성분은 지수함수를 취해 양수로 만듦 (Positive Definite 보장)
+        # 이건 비대칭이라 positive definite은 절대 아니고, positive determinant 또는 positive eigenvalue 정도인데?
         L.diagonal(dim1=1, dim2=2).exp_()
 
+        # 이게 Advantage 함수의 곡률 행렬인데...(128, 2, 2) * (128, 2, 2) -> (128, 2, 2)
         # P = L * L^T
         P = L @ L.transpose(2, 1)
 
-        # Advantage 계산: A = -0.5 * (a - mu)^T * P * (a - mu)
+        # a 도 행동이고 mu는 네트워크에서 계산한 행동이고 다 (128, 2)...즉 (입력 행동 - 계산 행동)...
         u_mu = (a - mu).unsqueeze(dim=1)  # (Batch, 1, Action)
         u_mu_t = u_mu.transpose(1, 2)  # (Batch, Action, 1)
 
+        # Advantage 계산: A = -0.5 * (a - mu)^T * P * (a - mu)
+        # (128, 1, 2) * (128, 2, 2) * (128, 2, 1) -> (128, 1, 1)
         adv = -0.5 * u_mu @ P @ u_mu_t
         adv = adv.squeeze(dim=-1)  # (Batch, 1)
 
@@ -145,14 +150,15 @@ class PytorchWrapper:
         self.env = gym.make(env_name, render_mode="rgb_array")
         obs_size = self.env.observation_space.shape[0]
         action_dims = self.env.action_space.shape[0]
+        # 연속 행동 공간에서 최대값...
         max_action = self.env.action_space.high
 
         # 네트워크 초기화
         self.q_net = NafDQN(hidden_size, obs_size, action_dims, max_action).to(device)
         self.target_q_net = copy.deepcopy(self.q_net).to(device)
-
+        # 옵티마이저와 손실함수...NAF는 주로 MSE 사용
         self.optimizer = optim.AdamW(self.q_net.parameters(), lr=lr)
-        self.loss_fn = nn.MSELoss()  # NAF는 주로 MSE 사용
+        self.loss_fn = nn.MSELoss()
 
         self.buffer = ReplayBuffer(capacity)
 
@@ -160,13 +166,14 @@ class PytorchWrapper:
         """
         Noisy Policy: Mu(s) + Noise
         """
-        # state를 (1, obs_size) 형태로 변환 (unsqueeze(0)는 한 번만 수행)
+        # state를 (1, obs_size) 형태로 변환 - (8,) -> (1, 8)
         state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
 
+        # 일단 행동 결정은 역전파 없이 하는데...
         with torch.no_grad():
             mu = self.q_net.mu(state_t)  # 출력 shape: (1, action_dims)
 
-        # 노이즈 추가
+        # 노이즈 추가 - 행동 벡터와 같은 모양의 정규분포 난수에 ε 곱을 더해준다..
         noise = torch.randn_like(mu) * epsilon
         action = mu + noise
 
@@ -176,11 +183,13 @@ class PytorchWrapper:
         action = action.clamp(amin, amax)
 
         # .squeeze()를 사용해 (1, action_dims) -> (action_dims,)로 변환하여 1차원 배열로 반환
+        # 근데 이걸 왜 state를 unsqueeze하고 action을 squeeze하지? 그냥 두면 레이어 행렬 곱이 안되나?
         return action.cpu().numpy().squeeze()
 
     def soft_update(self, net, target_net):
         """Polyak Averaging을 이용한 타겟 네트워크 업데이트"""
         for param, target_param in zip(net.parameters(), target_net.parameters()):
+            # τ 비율 만큼만 메인 네트워크에서 타겟 네트워크로 업데이트...
             target_param.data.copy_(
                 self.tau * param.data + (1 - self.tau) * target_param.data
             )
@@ -189,9 +198,9 @@ class PytorchWrapper:
         if len(self.buffer) < self.batch_size:
             return 0.0
 
+        # 재생 버퍼에서 샘플링해서 s, a, r, done, s' 별로 gpu 텐서 만드는 건 동일하고...
         batch = self.buffer.sample(self.batch_size)
         states, actions, rewards, dones, next_states = zip(*batch)
-
         states = torch.tensor(np.array(states), dtype=torch.float32, device=device)
         actions = torch.tensor(np.array(actions), dtype=torch.float32, device=device)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(1)
@@ -208,6 +217,7 @@ class PytorchWrapper:
         # NAF의 장점: max_a Q(s', a) = V(s')
         # 따라서 별도의 최적화 없이 V(s')만 가져오면 됨
         with torch.no_grad():
+            # 그냥 순전파시키면 Q값, value(s') 호출하면 상태가치 반환...
             next_v = self.target_q_net.value(next_states)
             target_q = rewards + (1 - dones) * self.gamma * next_v
 
@@ -226,13 +236,16 @@ class PytorchWrapper:
     def run_training(self, max_episodes=600, max_steps=1000):
         total_rewards = []
 
-        for episode in range(max_episodes):
+        # 에피소드 수만큼 돌면서 학습...
+        for episode in tqdm(range(max_episodes)):
             state, _ = self.env.reset()
             episode_reward = 0
 
-            # 탐험 노이즈 크기 조절
+            # 탐험 노이즈 크기 조절 - 이건 ε 확률로 무작위 행동을 하는게 아니라,
+            # 행동에 정규분포 난수를 ε 만큼 확대시킨 노이즈를 추가한다...
             epsilon = max(0.1, 1.0 - (episode / 200))
 
+            # 최대 max_steps까지만 진행해보고...
             for step in range(max_steps):
                 action = self.get_action(state, epsilon)
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
@@ -242,6 +255,7 @@ class PytorchWrapper:
                 state = next_state
                 episode_reward += reward
 
+                # 데이터 충분하면 학습, 아니면 그냥 넘어가기...
                 self.train_step()
 
                 if done:
@@ -277,3 +291,16 @@ agent = PytorchWrapper("LunarLanderContinuous-v3", hidden_size=256, lr=1e-3)
 print("NAF (Normalized Advantage Function) 학습을 시작한다...")
 history = agent.run_training(max_episodes=200)  # 학습 시간이 오래 걸릴 수 있음
 print("학습 완료.")
+
+# 결과 시각화 - 학습 곡선
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("NAF Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+agent.save_video("go2_drl-08_naf")
+
+# 그리 썩 학습이 잘되는거 같지는 않은데...일단 오래걸리고 에피소드 수를 적게하고..뭐 그런 문제인가?

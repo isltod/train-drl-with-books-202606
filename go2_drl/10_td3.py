@@ -8,6 +8,7 @@ import torch.optim as optim
 from collections import deque
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -171,6 +172,7 @@ class PytorchWrapper:
         # ----------------------------
         with torch.no_grad():
             # Target Policy Smoothing: 타겟 행동에 노이즈 추가
+            # 행동 벡터 모양으로 정규분포 난수 구해서 노이즈 곱하고 적당한 범위로 자르기...
             noise = (torch.randn_like(actions) * self.policy_noise).clamp(
                 -self.noise_clip, self.noise_clip
             )
@@ -184,6 +186,7 @@ class PytorchWrapper:
             target_q = torch.min(target_q1, target_q2)
             y_target = rewards + (1 - dones) * self.gamma * target_q
 
+        # 타겟 Q는 min으로 통일하는데, 메인 Q는 둘 따로 구해서 각 손실을 합해서 SGD한다...
         # 현재 Q값 예측
         current_q1 = self.critic1(states, actions)
         current_q2 = self.critic2(states, actions)
@@ -202,16 +205,18 @@ class PytorchWrapper:
         # ----------------------------
         # 2. Actor 업데이트 (Delayed Update)
         # ----------------------------
+        # 매번 하는게 아니라 정해진 주기 때만 업데이트...
         if self.total_it % self.policy_delay == 0:
-            # Actor 손실: Q1 값을 최대화
+            # 일단 행위자는 하나니까 1개의 행동을 순전파로 구하는데...
             predicted_actions = self.actor(states)
+            # Actor 손실: Q1 값을 최대화? 왜 Q1이지? min 값을 낸 Q로 해야 하는거 아닌가?
             actor_loss = -self.critic1(states, predicted_actions).mean()
 
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
             self.actor_optimizer.step()
 
-            # 타겟 네트워크 소프트 업데이트
+            # 타겟 네트워크 소프트 업데이트 - 비평가가 2이니 총 3개의 타겟이 있다...
             self.soft_update(self.actor, self.actor_target)
             self.soft_update(self.critic1, self.critic1_target)
             self.soft_update(self.critic2, self.critic2_target)
@@ -223,7 +228,7 @@ class PytorchWrapper:
     def run_training(self, max_episodes=600, max_steps=1000):
         total_rewards = []
 
-        for episode in range(max_episodes):
+        for episode in tqdm(range(max_episodes)):
             state, _ = self.env.reset()
             episode_reward = 0
 
@@ -281,3 +286,16 @@ agent = PytorchWrapper(
 print("TD3 (Twin Delayed DDPG) 학습을 시작한다...")
 history = agent.run_training(max_episodes=500)
 print("학습 완료.")
+
+# 결과 시각화 - 학습 곡선
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("TD3 Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
+
+agent.save_video("go2_drl-10_td3")
+
+# 처음에는 점수가 너무 안좋았는데 막판에 꽤 수렴하면서 좋아졌다...

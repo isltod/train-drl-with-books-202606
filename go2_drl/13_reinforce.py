@@ -141,9 +141,10 @@ class PytorchWrapper:
         returns = self.calculate_returns(rewards)
 
         # 3. 정책 손실 계산 (Policy Loss)
-        # return이 각 타임스텝 별 Gt가 들어있는 텐서니 log_prob도 stack하나?
+        # return이 각 타임스텝 별 Gt가 들어있는 텐서, log_probs는 현재 리스트 안에 개별 log_prob 텐서가 들어있는 상태...
         # Loss = - sum( log_prob * return )
         log_probs = torch.stack(log_probs)
+        # 근데 이렇게 Normal에서 log_prob 받아서 그걸 return과 곱하면 역전파가 전달돼서 학습되는 모양이네...
         loss = -(log_probs * returns).sum()
 
         # 4. 역전파 및 업데이트
@@ -156,6 +157,7 @@ class PytorchWrapper:
     def run_training(self, max_episodes=1000, print_interval=200):
         total_rewards = []
 
+        # 에피소드 수만큼 돌면서...
         for episode in range(max_episodes):
             episode_reward = self.train_episode()
             total_rewards.append(episode_reward)
@@ -192,12 +194,12 @@ history = agent.run_training(max_episodes=1000)
 print("학습 완료.")
 
 # 결과 시각화 - 학습 곡선
-# plt.figure(figsize=(10, 5))
-# plt.plot(history)
-# plt.title("REINFORCE Episode Rewards")
-# plt.xlabel("Episode")
-# plt.ylabel("Reward")
-# plt.grid(True)
-# plt.show()
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("REINFORCE Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+plt.grid(True)
+plt.show()
 
 agent.save_video("go2_drl-13_reinforce")

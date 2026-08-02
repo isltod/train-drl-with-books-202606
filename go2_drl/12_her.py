@@ -10,6 +10,7 @@ from collections import deque
 import gymnasium as gym
 import gymnasium_robotics
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # GPU 사용 가능 여부 확인
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -294,7 +295,7 @@ class PytorchWrapper:
         states, actions, rewards, dones, next_states = self.buffer.sample(
             self.batch_size
         )
-
+        # s, a, r, done, s' 별로 gpu 텐서로 묶는건 같고...
         states = torch.tensor(states, dtype=torch.float32, device=device)
         actions = torch.tensor(actions, dtype=torch.float32, device=device)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
@@ -304,12 +305,18 @@ class PytorchWrapper:
         # SAC Update Logic
         # 1. Critic Update
         with torch.no_grad():
+            # 다음 상태의 행동 샘플링 (Current Policy 사용)
             next_actions, next_log_probs = self.actor(next_states)
+            # 타겟 Q값 계산 - 현재 정책으로 다음 Q 계산하고 그 중 min 선택...
             target_q1, target_q2 = self.critic_target(next_states, next_actions)
+            # Soft Critic Update: 엔트로피 항(alpha * log_prob)을 뺌
+            # y = r + gamma * (min_Q - alpha * log_pi)
             target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_probs
             y_target = rewards + (1 - dones) * self.gamma * target_q
 
+        # 현재 Q값
         current_q1, current_q2 = self.critic(states, actions)
+        # Critic 손실 - Q1, Q2 손실을 더해서 최소화시킨다...
         critic_loss = F.mse_loss(current_q1, y_target) + F.mse_loss(
             current_q2, y_target
         )
@@ -319,8 +326,13 @@ class PytorchWrapper:
         self.critic_optimizer.step()
 
         # 2. Actor Update
+        # Reparameterization Trick을 사용하여 행동 샘플링
+        # 저장된 경험의 s로 순전파 해서 저장된 a가 아닌 현재 행위자의 new_a를 받고,
         new_actions, log_probs = self.actor(states)
+        # 그걸 비평가가 Q1, Q2로 만든다...
         q1, q2 = self.critic(states, new_actions)
+        # Actor 손실: 엔트로피 최대화 + Q값 최대화 -> 이 Q값을 최대화하도록 행위자를 학습시킨다...
+        # Loss = alpha * log_pi - minQ
         actor_loss = (self.alpha * log_probs - torch.min(q1, q2)).mean()
 
         self.actor_optimizer.zero_grad()
@@ -333,17 +345,22 @@ class PytorchWrapper:
     def run_training(self, max_epochs=200, episodes_per_epoch=10, updates_per_epoch=40):
         success_rates = []
 
-        for epoch in range(max_epochs):
+        # HER는 특이하게 에피소드 단위가 아니라 에포크 단위로 돌면서 처리...
+        for epoch in tqdm(range(max_epochs)):
             # 1. 에피소드 수집
             total_success = 0
+            # 각 에포크 별로 40번의 에피소드를 시행하는데...많은 거 아닌가?
+            # 앞은 에피소드가 500번인데 여긴 에포크 200 * per 에피소드 10 = 2000번인데...
             for _ in range(episodes_per_epoch):
+                # 경험 저장은 반환값이 아닌 play_episode 메서드 내에서 처리...
                 _, is_success = self.play_episode()
                 total_success += is_success
 
-            # 2. 학습 수행
+            # 2. 학습 수행 - 8000번 학습인데...
             for _ in range(updates_per_epoch):
                 self.train_step()
 
+            # 이번 에포크의 성공 비율...
             success_rate = total_success / episodes_per_epoch
             success_rates.append(success_rate)
 
@@ -376,3 +393,16 @@ history = agent.run_training(
     max_epochs=1000, episodes_per_epoch=10, updates_per_epoch=40
 )
 print("학습 완료.")
+
+# 결과 시각화 - 성공률 그래프
+plt.figure(figsize=(10, 5))
+plt.plot(history)
+plt.title("SAC + HER Success Rate")
+plt.xlabel("Epoch")
+plt.ylabel("Success Rate")
+plt.grid(True)
+plt.show()
+# 시뮬레이션 비디오
+agent.save_video("go2_drl-12_her")
+
+# 뭔가 잘하는거 같기도 하고, 녹화는 또 이상한거 같기도 하고...

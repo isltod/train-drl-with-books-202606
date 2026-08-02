@@ -112,6 +112,7 @@ class HERReplayBuffer:
         # 1. 에피소드 인덱스 선택 - 현재 저장된 모든 경험 중 batch_size 만큼 랜덤 선택
         indices = np.random.randint(0, len(self.buffer), batch_size)
 
+        # s, a, s, g, g', r을 메인 dequeue가 아니라 별도의 리스트로 만들어서 사용...
         states, actions, next_states = [], [], []
         desired_goals, achieved_goals = [], []
         rewards = []
@@ -121,26 +122,33 @@ class HERReplayBuffer:
             # 실제 궤적 내용을 받고
             episode = self.buffer[idx]
 
-            # 2. 에피소드 내에서 다시 무작위로 현재 타임스텝(t) 선택해서 전이(s, a, r, done, s') 선택
+            # 2. 에피소드 내에서 다시 무작위로 현재 타임스텝(t) 선택해서
             t = np.random.randint(0, len(episode))
             transition = episode[t]
-
+            # 그 전이에서 s, a, s', g 선택
             obs = transition["obs"]
             action = transition["action"]
             next_obs = transition["next_obs"]
             goal = transition["desired_goal"]
 
-            # 3. HER 적용 여부 결정 (Future Strategy) -------------------------------여기부터 다시...
+            # 3. her_ratio 확률로 HER 적용 여부 결정 (Future Strategy)
             if np.random.random() < self.her_ratio:
+                # HER 적용이면, 현재 t에서 그 궤적 끝 사이에 특정 미래를 무작위 선택
                 future_t = np.random.randint(t, len(episode))
                 future_transition = episode[future_t]
+                # 해당 미래 로봇팔 위치가 achieved_goal
                 goal = future_transition["achieved_goal"]
 
-            # 4. 보상 재계산 (unwrapped 사용)
+            # 4. 보상 재계산 - HER는 play 중에 즉각 보상을 받지 않고 이렇게 나중에 HER 적용하고 계산하는 모양...
+            # unwrapped는 모든 Wrapper 층 제거
+            # compute_reward: achieved_goal, desired_goal, info 받아서 보상을 재계산 해주는 메서드라고...
+            # 여기 goal은 HER 적용 안되면 desired_goal, 적용되면 achieved_goal인 상태,
+            # info는 중요하지 않은 듯...원래는 desired_goal 달성 여부가 반환되는데 빈 사전으로 사용하네...
             reward = self.env.unwrapped.compute_reward(
                 transition["achieved_goal"], goal, {}
             )
 
+            # s, a, s', g(or g'), r'을 리스트에 추가...
             states.append(obs)
             actions.append(action)
             next_states.append(next_obs)
@@ -152,10 +160,11 @@ class HERReplayBuffer:
         next_states = np.array(next_states)
         desired_goals = np.array(desired_goals)
         actions = np.array(actions)
-        rewards = np.array(rewards).reshape(-1, 1)  # 이제 에러가 나지 않습니다.
+        # 이렇게 해서 에러를 잡았다는 메모가 붙어있는데...원래가 (256, 1) 형태라 있으나 마나인데?
+        rewards = np.array(rewards).reshape(-1, 1)
         dones = np.zeros_like(rewards)
 
-        # 입력 벡터 구성
+        # 상태와 원래 목표는 concat 해서 사용하는 입력 벡터로 구성
         inp_states = np.concatenate([states, desired_goals], axis=1)
         inp_next_states = np.concatenate([next_states, desired_goals], axis=1)
 
@@ -227,30 +236,37 @@ class PytorchWrapper:
                 self.tau * param.data + (1 - self.tau) * target_param.data
             )
 
-    # 여기 보고 다시 위에 재생 버퍼로 돌아가서 봐야지....-------------------------------------
+    # 하나의 에피소드 궤적을 생성해서 저장...
     def play_episode(self):
         """
         에피소드를 실행하고 궤적(Trajectory)을 저장
         """
+        # HER은 딕셔너리 받아서 거기서 상태는 observation, 원래 목표는 desired_goal...
         obs_dict, _ = self.env.reset()
         obs = obs_dict["observation"]
+        # 원래 목표는 절대 안바뀌는 모양...여기서 한 번 정하고 그대로 쓴다...로봇 팔 끝이 도달해야 하는 원래 목표 x, y, z
         desired_goal = obs_dict["desired_goal"]
 
+        # 에피소드 궤적은 {s, a, s', g, g'} 사전들의 리스트...
         episode_trajectory = []
         done = False
         truncated = False
         episode_reward = 0
 
+        # 에피소드 끝까지 돌면서...
         while not (done or truncated):
+            # 상태와 원래 목표를 concat하고, 순전파 아닌 get_action으로 역전파 연결 없이 행동 샘플링
+            # ndarray(4,) 형태로, 손끝의 좌표 변위 dx, dy, dz 세 개와 그리퍼 열고 닫기 정도
             action = self.get_action(obs, desired_goal)
+            # step의 반환도 dict, r, done, truncated, info 형태로 다르고...
             next_obs_dict, reward, done, truncated, info = self.env.step(action)
 
+            # 상태는 집게 위치 3, 집게 속도 3, 집게 벌어짐 2, 손가락 속도 2로 (10,) 구조...
             next_obs = next_obs_dict["observation"]
-            achieved_goal = next_obs_dict[
-                "achieved_goal"
-            ]  # 현재 달성한 상태 (HER에서 중요)
+            # 현재 달성한 상태 (HER에서 중요) - 로봇 팔 끝단의 현재 x, y, z
+            achieved_goal = next_obs_dict["achieved_goal"]
 
-            # 궤적 저장 (obs, action, next_obs, desired_goal, achieved_goal)
+            # 궤적 저장 (obs, action, next_obs, desired_goal, achieved_goal) - 특이하게 즉각 보상이 없다...나증에 계산...
             episode_trajectory.append(
                 {
                     "obs": obs,
@@ -264,9 +280,10 @@ class PytorchWrapper:
             obs = next_obs
             episode_reward += reward
 
-        # 에피소드 전체를 버퍼에 저장
+        # 에피소드 전체를 버퍼에 저장 - 실제로는 아래 반환값보다 이걸 이용하네...
         self.buffer.append(episode_trajectory)
 
+        # 사용하건 말건 어쨌거나 에피소드의 즉각보상 누적과 성공 여부를 반환...
         return episode_reward, info["is_success"]
 
     def train_step(self):

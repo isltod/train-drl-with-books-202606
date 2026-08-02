@@ -203,3 +203,5 @@ plt.grid(True)
 plt.show()
 
 agent.save_video("go2_drl-13_reinforce")
+
+# 뭔가 학습도 안되고...

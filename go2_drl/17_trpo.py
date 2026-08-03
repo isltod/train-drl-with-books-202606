@@ -94,7 +94,9 @@ class Actor(nn.Module):
         mean = self.mean_layer(x)
         # 표준편차는 log 없애고(이럴러면 왜 log라고?),
         # expand_as는 새로 메모리를 만들지 않고 뷰만 늘려서 mean과 같은 크기로 보이게 만들기..
-        # 대신 크기가 1인 차원만 늘릴 수 있다고...(1, 행동) -> (히든, 행동)으로...
+        # 대신 크기가 1인 차원만 늘릴 수 있다고...
+        # 근데 여긴 std와 mean이 shape이 같아서 expand_as 왜 하는지 모르겠다...
+        std = self.log_std.exp()
         std = self.log_std.exp().expand_as(mean)
         return mean, std
 
@@ -142,7 +144,7 @@ class PytorchWrapper:
         self.backtrack_coeff = backtrack_coeff
         self.n_steps = n_steps
 
-        # 환경 생성
+        # 환경 생성 - Luna Lander Continuous v3, 상태 8, 행동 2
         self.env = gym.make(env_name, render_mode="rgb_array")
         obs_size = self.env.observation_space.shape[0]
         action_dim = self.env.action_space.shape[0]
@@ -164,52 +166,58 @@ class PytorchWrapper:
     def compute_gae(self, rewards, values, dones, next_value):
         """
         GAE (Generalized Advantage Estimation) 계산
-        Advantage = delta + gamma * lambda * next_Advantage
+        A = δ + γ* λ * A'
         이게 λ가 0이면 TD고 1이면 MC라는데..왜 그런거냐...암튼 현재는 0.95
         """
-        # 일단 일반화된 Advantage 추정값을 0으로 초기화하고...
+        # Advantage 추정값을 0으로 초기화하고...
         advantages = torch.zeros_like(rewards).to(device)
-        # 마지막 λ는 0?
+        # λ 추정치도 0으로 초기화
         last_gae_lam = 0
 
         # 즉각 보상의 마지막부터 역순으로...
         for t in reversed(range(len(rewards))):
-            # 마지막 타임 스텝이면...
             if t == len(rewards) - 1:
-                # 마스킹은 없고, GAE 추정은 그냥 다음 상태 가치?...
+                # 마지막 스텝은 Done 여부를 알 수 없으므로 마스킹은 없고
                 next_non_terminal = 1.0 - 0.0
+                # 다음 t'의 상태 가치는 마지막 이후 상태 가치로...
                 next_val = next_value
             else:
-                # 아니면 다음 스텝 종료 조건에 따라 마스킹---------------------여기 보던 중...
+                # 아니면 다음 스텝 종료 조건에 따라 마스킹
                 next_non_terminal = 1.0 - dones[t + 1]
+                # 다음 t'의 상태 가치는 비평가 평가 상태 가치로...
                 next_val = values[t + 1]
 
+            # TD Error: δ = r + γV' - V
             delta = rewards[t] + self.gamma * next_val * next_non_terminal - values[t]
+            # GAE: A = δ + γλ * A_next? 현재 식은 λ'(A) = δ + γλ 인데?
             last_gae_lam = (
                 delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
             )
             advantages[t] = last_gae_lam
 
+        # 이렇다는 건, returns는 t 별 Q가 되는데...
         returns = advantages + values
+        # 반환은 t 별로 GAE 추정과 Q
         return advantages, returns
 
     def fisher_vector_product(self, vector, states):
         """
         Fisher Information Matrix와 벡터의 곱 (Hv) 계산
         """
-        # 1. 미분 가능하도록 출력 계산
+        # 1. 먼저 행동 분포를 미분 가능하도록 순전파로 얻고
         mean, std = self.actor(states)
         dist = Normal(mean, std)
 
-        # 2. 고정된 Old Policy (그래프에서 분리)
+        # 2. 고정된 Old Policy로 넣어서 그래프에서 분리...근데 현재 mean = mean_old인데...
         with torch.no_grad():
             mean_old, std_old = mean.detach(), std.detach()
             dist_old = Normal(mean_old, std_old)
 
-        # 3. KL Divergence 계산
+        # 3. KL Divergence 계산 - 근데 dist_old == dist 일텐데?
         kl = torch.distributions.kl.kl_divergence(dist_old, dist).mean()
 
-        # 4. 1차 미분 (create_graph=True가 핵심!)
+        # 4. 1차 미분 (create_graph=True - 고차 미분 가능)
+        # torch.autograd.grad - 기울기를 .grad 속성에 누적하지 않고 바로 반환하는 함수...
         # 여기서 grads는 텐서들의 튜플이며, 각 텐서는 grad_fn을 가집니다.
         grads = torch.autograd.grad(kl, self.actor.parameters(), create_graph=True)
 
@@ -232,21 +240,27 @@ class PytorchWrapper:
 
         state, _ = self.env.reset()
 
+        # n step 단위로 묶어서 실행/학습...
         for _ in range(self.n_steps):
             state_t = torch.tensor(
                 np.array([state]), dtype=torch.float32, device=device
             )
 
+            # 데이터 수집 단계는 역전파 끊고 a, V를 구하나?
             with torch.no_grad():
+                # 행동은 평균과 표준편차로 정규분포에서 샘플링
                 mean, std = self.actor(state_t)
                 dist = Normal(mean, std)
                 action = dist.sample()
+                # 상태 가치는 비평가 순전파
                 value = self.critic(state_t)
 
+            # 행동으로 s', r, 종료여부 얻고
             action_np = action.cpu().numpy()[0]
             next_state, reward, terminated, truncated, _ = self.env.step(action_np)
             done_flag = terminated or truncated
 
+            # n step 단위로 묶어준다...
             states.append(state_t)
             actions.append(action)
             rewards.append(reward)
@@ -254,28 +268,40 @@ class PytorchWrapper:
             values.append(value)
 
             state = next_state
+            # n step 중에 종료되면 게임 다시 시작
             if done_flag:
                 state, _ = self.env.reset()
 
+        # s, a, r, done, V는 n step 단위로 텐서로 묶어서...
         states = torch.cat(states)
         actions = torch.cat(actions)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
         dones = torch.tensor(dones, dtype=torch.float32, device=device)
         values = torch.cat(values).squeeze()
 
+        # n step 바로 다음 상태 가치 계산 (GAE용)
         with torch.no_grad():
+            # 여기 state는 위 for 문 마지막의 state = next_state 때문에 n step 바로 다음 상태를 가리킨다...
             next_state_t = torch.tensor(
-                np.array([state]), dtype=torch.float32, device=device
+                np.array([state]),
+                dtype=torch.float32,
+                device=device,
             )
             next_value = self.critic(next_state_t).squeeze()
 
+        # GAE 계산
+        # 각 t 별로 이어진 텐서로, r: 즉각 보상들, v: 비평가 평가 상태 가치, d: 종료 여부,
+        # v'은 n step 다음 t'의 상태 가치 스칼라
+        # 반환 값은 시간 t 별로 묶은 GAE 추정치들과 Q 값들...
         advantages, returns = self.compute_gae(rewards, values, dones, next_value)
-        # Advantage 정규화
+        # Advantage 정규화 - 단지 학습 안정화를 위해서 취한다고...
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # 2. Critic 업데이트 (MSE Loss)
         for _ in range(10):  # Critic은 여러 번 업데이트
+            # 현재 비평가가 예측하는 상태 가치? Q?
             v_pred = self.critic(states).squeeze()
+            # returns는 A + V인데 그걸 비평가 V와 비교? 비평가가 Q를 학습하나?
             v_loss = F.mse_loss(v_pred, returns)
             self.critic_optimizer.zero_grad()
             v_loss.backward()

@@ -42,8 +42,8 @@ class Actor(nn.Module):
         mean = self.mean_layer(x)
         # 표준편차는 log 없애고(이럴러면 왜 log라고?),
         # expand_as는 새로 메모리를 만들지 않고 뷰만 늘려서 mean과 같은 크기로 보이게 만들기..
-        # 대신 크기가 1인 차원만 늘릴 수 있다고...(1, 행동) -> (히든, 행동)으로...
-        # 배치 크기에 맞게 확장? 이라고? 나중에 다시 보자...
+        # 대신 크기가 1인 차원만 늘릴 수 있다고...
+        # 근데 이건 expand_as 하나 안하나 mean과 std가 같은 shape인데 왜 하지?
         std = self.log_std.exp().expand_as(mean)
         return mean, std
 

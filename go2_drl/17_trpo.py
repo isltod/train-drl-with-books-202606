@@ -1,3 +1,10 @@
+"""
+실습 코드라고 받은 노트북 파일의 코드인데, 중간에 flat_param 문제가 있어 실행시킬 수가 없다.
+뭘 하는 함수인지 짐작으로 고쳐볼 수는 있겠지만 TRPO 알고리즘에 대한 이해가 없어서 그러기도 힘들다.
+대신 책의 소스코드는 이것과 다르고 실행되는 거 같다.
+17_trpo_book 참고...
+"""
+
 import copy
 import random
 import numpy as np
@@ -309,23 +316,30 @@ class PytorchWrapper:
 
         # 3. Actor 업데이트 (TRPO)
 
-        # 현재 정책의 Log Probability 계산
+        # 현재 정책의 Log Probability 계산 - 근데 현재를 자꾸 old라고 해놓네....
         mean, std = self.actor(states)
         dist = Normal(mean, std)
         old_log_probs = dist.log_prob(actions).sum(dim=-1).detach()
 
         # Surrogate Loss 함수 정의
         def get_loss(volatile=False):
+            # 휘발성 플래그 지정하면
             if volatile:
+                # 역전파 끊고 mean, std, log_probs 계산하고...
                 with torch.no_grad():
                     mean, std = self.actor(states)
                     dist = Normal(mean, std)
+                    # 근데 이러면 위에 old_log_probs와 여기 log_probs가 차이가 뭐지?
                     log_probs = dist.log_prob(actions).sum(dim=-1)
             else:
+                # 휘발성 아니면 역전파 연결 상태에서 mean, std, log_probs 계산해서...
                 mean, std = self.actor(states)
                 dist = Normal(mean, std)
                 log_probs = dist.log_prob(actions).sum(dim=-1)
 
+            # 두 확률 비율에 Advantage 들 곱한 값들의 평균을 반환...
+            aa = log_probs.cpu().detach().numpy()
+            bb = old_log_probs.cpu().detach().numpy()
             ratio = torch.exp(log_probs - old_log_probs)
             return -(ratio * advantages).mean()
 
@@ -346,6 +360,7 @@ class PytorchWrapper:
         full_step = step_dir * max_step
 
         # Line Search (Backtracking)
+        # 이게 뭔 함수인지 모르겠고, 지금으로선 추측도 못하겠다...그리고 여기 코드는 책과 또 틀리다...
         old_params = flat_params(self.actor)
         expected_improve = -(loss_grad * full_step).sum()
 

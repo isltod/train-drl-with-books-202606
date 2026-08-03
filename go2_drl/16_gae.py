@@ -63,6 +63,7 @@ class Critic(nn.Module):
         return self.net(x)
 
 
+# 학습 클래스
 class PytorchWrapper:
     def __init__(
         self,
@@ -70,7 +71,7 @@ class PytorchWrapper:
         hidden_size=64,
         lr=3e-4,
         gamma=0.99,
-        gae_lambda=0.95,  # GAE 파라미터
+        gae_lambda=0.95,
         clip_coef=0.2,
         ent_coef=0.0,
         vf_coef=0.5,
@@ -81,7 +82,7 @@ class PytorchWrapper:
     ):
         self.env_name = env_name
         self.gamma = gamma
-        self.gae_lambda = gae_lambda
+        self.gae_lambda = gae_lambda  # GAE 파라미터
         self.clip_coef = clip_coef
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
@@ -99,9 +100,8 @@ class PytorchWrapper:
         self.actor = Actor(obs_size, hidden_size, action_dim).to(device)
         self.critic = Critic(obs_size, hidden_size).to(device)
 
-        # 최적화기 (Actor와 Critic 파라미터를 함께 최적화)
+        # 최적화기
         self.optimizer = optim.AdamW(
-            # 이렇게 리스트로 더해서 넣으면 다 관리하는 모양...
             list(self.actor.parameters()) + list(self.critic.parameters()),
             lr=lr,
             eps=1e-5,
@@ -130,7 +130,6 @@ class PytorchWrapper:
 
         # 즉각 보상의 마지막부터 역순으로...
         for t in reversed(range(len(rewards))):
-            # 마지막 타임 스텝이면...
             if t == len(rewards) - 1:
                 # 마지막 스텝은 Done 여부를 알 수 없으므로 마스킹은 없고
                 next_non_terminal = 1.0 - 0.0
@@ -144,6 +143,7 @@ class PytorchWrapper:
 
             # TD Error: δ = r + γV' - V
             delta = rewards[t] + self.gamma * next_val * next_non_terminal - values[t]
+
             # GAE: A = δ + γλ * A_next? 현재 식은 λ'(A) = δ + γλ 인데?
             last_gae_lam = (
                 delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
@@ -151,6 +151,7 @@ class PytorchWrapper:
             advantages[t] = last_gae_lam
 
         # 이렇다는 건, returns는 t 별 Q가 되는데...
+        # Returns = Advantage + Value (타겟 가치 함수 학습용)
         returns = advantages + values
         # 반환은 t 별로 GAE 추정과 Q
         return advantages, returns
@@ -216,7 +217,7 @@ class PytorchWrapper:
             # n step 다음 상태의 상태 가치를 비평가가 평가...
             next_value = self.critic(next_state_t).squeeze()
 
-        # 2. GAE 계산
+        # 2. GAE 계산 (이 챕터의 핵심)
         # 각 t 별로 이어진 텐서로, r: 즉각 보상들, v: 비평가 평가 상태 가치, d: 종료 여부,
         # v'은 n step 다음 t'의 상태 가치 스칼라
         # 반환 값은 시간 t 별로 묶은 GAE 추정치들과 Q 값들...
@@ -268,10 +269,9 @@ class PytorchWrapper:
 
                 # Ratio 계산 (pi_new / pi_old) - 로그 확률이니 빼는 것이 나누기...
                 log_ratio = new_log_probs - mb_old_log_probs
-                # 확률로 변환
                 ratio = log_ratio.exp()
 
-                # Surrogate Loss (Clipped Objective)
+                # Surrogate Loss (PPO Clipped Objective)
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(
                     ratio, 1 - self.clip_coef, 1 + self.clip_coef
@@ -312,7 +312,7 @@ class PytorchWrapper:
 
         return rewards_history
 
-    def save_video(self, filename="ppo_video"):
+    def save_video(self, filename="gae_video"):
         env = gym.make(self.env_name, render_mode="rgb_array")
         env = gym.wrappers.RecordVideo(env, video_folder="videos", name_prefix=filename)
 
@@ -326,30 +326,32 @@ class PytorchWrapper:
         env.close()
 
 
-# PPO 모델 생성
+# GAE + PPO 모델 생성
 agent = PytorchWrapper(
     "LunarLanderContinuous-v3",
     hidden_size=128,
     lr=3e-4,
+    gamma=0.99,
+    gae_lambda=0.95,  # GAE Lambda 설정
     n_steps=2048,
     batch_size=64,
     n_epochs=10,
 )
 
 # 학습 시작
-print("PPO (Proximal Policy Optimization) 학습을 시작한다...")
+print("GAE (Generalized Advantage Estimation) PPO 학습을 시작한다...")
 history = agent.run_training(max_timesteps=300000)
 print("학습 완료.")
 
 # 결과 시각화 - 학습 곡선
 plt.figure(figsize=(10, 5))
 plt.plot(history)
-plt.title("PPO Returns")
+plt.title("PPO + GAE Returns")
 plt.xlabel("Updates")
 plt.ylabel("Mean Return")
 plt.grid(True)
 plt.show()
 
-agent.save_video("go2_drl-15_ppo")
+agent.save_video("go2_drl-16_gae-ppo")
 
-# 이것도 별로 잘 못하는데? 수렴은 해가는거 같은데...
+# 결국 이건 앞의 PPO와 같은 코드였다...책이 정말...
